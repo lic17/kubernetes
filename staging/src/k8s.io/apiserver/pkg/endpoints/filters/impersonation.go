@@ -20,9 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
-	"github.com/golang/glog"
+	"k8s.io/klog/v2"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/api/core/v1"
@@ -41,7 +42,7 @@ func WithImpersonation(handler http.Handler, a authorizer.Authorizer, s runtime.
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		impersonationRequests, err := buildImpersonationRequests(req.Header)
 		if err != nil {
-			glog.V(4).Infof("%v", err)
+			klog.V(4).Infof("%v", err)
 			responsewriters.InternalError(w, req, err)
 			return
 		}
@@ -67,16 +68,18 @@ func WithImpersonation(handler http.Handler, a authorizer.Authorizer, s runtime.
 		groups := []string{}
 		userExtra := map[string][]string{}
 		for _, impersonationRequest := range impersonationRequests {
+			gvk := impersonationRequest.GetObjectKind().GroupVersionKind()
 			actingAsAttributes := &authorizer.AttributesRecord{
 				User:            requestor,
 				Verb:            "impersonate",
-				APIGroup:        impersonationRequest.GetObjectKind().GroupVersionKind().Group,
+				APIGroup:        gvk.Group,
+				APIVersion:      gvk.Version,
 				Namespace:       impersonationRequest.Namespace,
 				Name:            impersonationRequest.Name,
 				ResourceRequest: true,
 			}
 
-			switch impersonationRequest.GetObjectKind().GroupVersionKind().GroupKind() {
+			switch gvk.GroupKind() {
 			case v1.SchemeGroupVersion.WithKind("ServiceAccount").GroupKind():
 				actingAsAttributes.Resource = "serviceaccounts"
 				username = serviceaccount.MakeUsername(impersonationRequest.Namespace, impersonationRequest.Name)
@@ -101,23 +104,50 @@ func WithImpersonation(handler http.Handler, a authorizer.Authorizer, s runtime.
 				userExtra[extraKey] = append(userExtra[extraKey], extraValue)
 
 			default:
-				glog.V(4).Infof("unknown impersonation request type: %v", impersonationRequest)
+				klog.V(4).Infof("unknown impersonation request type: %v", impersonationRequest)
 				responsewriters.Forbidden(ctx, actingAsAttributes, w, req, fmt.Sprintf("unknown impersonation request type: %v", impersonationRequest), s)
 				return
 			}
 
-			decision, reason, err := a.Authorize(actingAsAttributes)
+			decision, reason, err := a.Authorize(ctx, actingAsAttributes)
 			if err != nil || decision != authorizer.DecisionAllow {
-				glog.V(4).Infof("Forbidden: %#v, Reason: %s, Error: %v", req.RequestURI, reason, err)
+				klog.V(4).Infof("Forbidden: %#v, Reason: %s, Error: %v", req.RequestURI, reason, err)
 				responsewriters.Forbidden(ctx, actingAsAttributes, w, req, reason, s)
 				return
 			}
 		}
 
-		if !groupsSpecified && username != user.Anonymous {
-			// When impersonating a non-anonymous user, if no groups were specified
-			// include the system:authenticated group in the impersonated user info
-			groups = append(groups, user.AllAuthenticated)
+		if username != user.Anonymous {
+			// When impersonating a non-anonymous user, include the 'system:authenticated' group
+			// in the impersonated user info:
+			// - if no groups were specified
+			// - if a group has been specified other than 'system:authenticated'
+			//
+			// If 'system:unauthenticated' group has been specified we should not include
+			// the 'system:authenticated' group.
+			addAuthenticated := true
+			for _, group := range groups {
+				if group == user.AllAuthenticated || group == user.AllUnauthenticated {
+					addAuthenticated = false
+					break
+				}
+			}
+
+			if addAuthenticated {
+				groups = append(groups, user.AllAuthenticated)
+			}
+		} else {
+			addUnauthenticated := true
+			for _, group := range groups {
+				if group == user.AllUnauthenticated {
+					addUnauthenticated = false
+					break
+				}
+			}
+
+			if addUnauthenticated {
+				groups = append(groups, user.AllUnauthenticated)
+			}
 		}
 
 		newUser := &user.DefaultInfo{
@@ -144,6 +174,14 @@ func WithImpersonation(handler http.Handler, a authorizer.Authorizer, s runtime.
 
 		handler.ServeHTTP(w, req)
 	})
+}
+
+func unescapeExtraKey(encodedKey string) string {
+	key, err := url.PathUnescape(encodedKey) // Decode %-encoded bytes.
+	if err != nil {
+		return encodedKey // Always record extra strings, even if malformed/unencoded.
+	}
+	return key
 }
 
 // buildImpersonationRequests returns a list of objectreferences that represent the different things we're requesting to impersonate.
@@ -175,7 +213,7 @@ func buildImpersonationRequests(headers http.Header) ([]v1.ObjectReference, erro
 		}
 
 		hasUserExtra = true
-		extraKey := strings.ToLower(headerName[len(authenticationv1.ImpersonateUserExtraHeaderPrefix):])
+		extraKey := unescapeExtraKey(strings.ToLower(headerName[len(authenticationv1.ImpersonateUserExtraHeaderPrefix):]))
 
 		// make a separate request for each extra value they're trying to set
 		for _, value := range values {

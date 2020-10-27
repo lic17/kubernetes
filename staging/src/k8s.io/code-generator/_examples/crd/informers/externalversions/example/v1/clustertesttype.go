@@ -19,13 +19,14 @@ limitations under the License.
 package v1
 
 import (
+	"context"
 	time "time"
 
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
 	cache "k8s.io/client-go/tools/cache"
-	example_v1 "k8s.io/code-generator/_examples/crd/apis/example/v1"
+	examplev1 "k8s.io/code-generator/_examples/crd/apis/example/v1"
 	versioned "k8s.io/code-generator/_examples/crd/clientset/versioned"
 	internalinterfaces "k8s.io/code-generator/_examples/crd/informers/externalversions/internalinterfaces"
 	v1 "k8s.io/code-generator/_examples/crd/listers/example/v1"
@@ -56,20 +57,20 @@ func NewClusterTestTypeInformer(client versioned.Interface, resyncPeriod time.Du
 func NewFilteredClusterTestTypeInformer(client versioned.Interface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
 		&cache.ListWatch{
-			ListFunc: func(options meta_v1.ListOptions) (runtime.Object, error) {
+			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.ExampleV1().ClusterTestTypes().List(options)
+				return client.ExampleV1().ClusterTestTypes().List(context.TODO(), options)
 			},
-			WatchFunc: func(options meta_v1.ListOptions) (watch.Interface, error) {
+			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.ExampleV1().ClusterTestTypes().Watch(options)
+				return client.ExampleV1().ClusterTestTypes().Watch(context.TODO(), options)
 			},
 		},
-		&example_v1.ClusterTestType{},
+		&examplev1.ClusterTestType{},
 		resyncPeriod,
 		indexers,
 	)
@@ -80,7 +81,7 @@ func (f *clusterTestTypeInformer) defaultInformer(client versioned.Interface, re
 }
 
 func (f *clusterTestTypeInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&example_v1.ClusterTestType{}, f.defaultInformer)
+	return f.factory.InformerFor(&examplev1.ClusterTestType{}, f.defaultInformer)
 }
 
 func (f *clusterTestTypeInformer) Lister() v1.ClusterTestTypeLister {

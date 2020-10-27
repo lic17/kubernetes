@@ -20,9 +20,9 @@ import (
 	"fmt"
 	"strings"
 
+	policy "k8s.io/api/policy/v1beta1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	api "k8s.io/kubernetes/pkg/apis/core"
-	"k8s.io/kubernetes/pkg/apis/policy"
 )
 
 const (
@@ -68,6 +68,7 @@ func GetAllFSTypesAsSet() sets.String {
 		string(policy.PortworxVolume),
 		string(policy.ScaleIO),
 		string(policy.CSI),
+		string(policy.Ephemeral),
 	)
 	return fstypes
 }
@@ -129,6 +130,10 @@ func GetVolumeFSType(v api.Volume) (policy.FSType, error) {
 		return policy.PortworxVolume, nil
 	case v.ScaleIO != nil:
 		return policy.ScaleIO, nil
+	case v.CSI != nil:
+		return policy.CSI, nil
+	case v.Ephemeral != nil:
+		return policy.Ephemeral, nil
 	}
 
 	return "", fmt.Errorf("unknown volume type for volume: %#v", v)
@@ -175,23 +180,27 @@ func GroupFallsInRange(id int64, rng policy.IDRange) bool {
 
 // AllowsHostVolumePath is a utility for checking if a PSP allows the host volume path.
 // This only checks the path. You should still check to make sure the host volume fs type is allowed.
-func AllowsHostVolumePath(psp *policy.PodSecurityPolicy, hostPath string) bool {
+func AllowsHostVolumePath(psp *policy.PodSecurityPolicy, hostPath string) (pathIsAllowed, mustBeReadOnly bool) {
 	if psp == nil {
-		return false
+		return false, false
 	}
 
 	// If no allowed paths are specified then allow any path
 	if len(psp.Spec.AllowedHostPaths) == 0 {
-		return true
+		return true, false
 	}
 
 	for _, allowedPath := range psp.Spec.AllowedHostPaths {
 		if hasPathPrefix(hostPath, allowedPath.PathPrefix) {
-			return true
+			if !allowedPath.ReadOnly {
+				return true, allowedPath.ReadOnly
+			}
+			pathIsAllowed = true
+			mustBeReadOnly = true
 		}
 	}
 
-	return false
+	return pathIsAllowed, mustBeReadOnly
 }
 
 // hasPathPrefix returns true if the string matches pathPrefix exactly, or if is prefixed with pathPrefix at a path segment boundary
@@ -232,6 +241,31 @@ func EqualStringSlices(a, b []string) bool {
 	for i := 0; i < len(a); i++ {
 		if a[i] != b[i] {
 			return false
+		}
+	}
+	return true
+}
+
+func IsOnlyServiceAccountTokenSources(v *api.ProjectedVolumeSource) bool {
+	for _, s := range v.Sources {
+		// reject any projected source that does not match any of our expected source types
+		if s.ServiceAccountToken == nil && s.ConfigMap == nil && s.DownwardAPI == nil {
+			return false
+		}
+		if t := s.ServiceAccountToken; t != nil && (t.Path != "token" || t.Audience != "") {
+			return false
+		}
+
+		if s.ConfigMap != nil && s.ConfigMap.LocalObjectReference.Name != "kube-root-ca.crt" {
+			return false
+		}
+
+		if s.DownwardAPI != nil {
+			for _, d := range s.DownwardAPI.Items {
+				if d.Path != "namespace" || d.FieldRef == nil || d.FieldRef.APIVersion != "v1" || d.FieldRef.FieldPath != "metadata.namespace" {
+					return false
+				}
+			}
 		}
 	}
 	return true

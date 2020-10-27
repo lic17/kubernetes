@@ -23,8 +23,10 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	_ "k8s.io/kubernetes/pkg/apis/storage/install"
+	"k8s.io/kubernetes/pkg/features"
 )
 
 func roundTrip(t *testing.T, obj runtime.Object) runtime.Object {
@@ -48,37 +50,43 @@ func roundTrip(t *testing.T, obj runtime.Object) runtime.Object {
 	return obj3
 }
 
+func TestSetDefaultStorageCapacityEnabled(t *testing.T) {
+	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CSIStorageCapacity, true)()
+	driver := &storagev1.CSIDriver{}
+
+	// field should be defaulted
+	defaultStorageCapacity := false
+	output := roundTrip(t, runtime.Object(driver)).(*storagev1.CSIDriver)
+	outStorageCapacity := output.Spec.StorageCapacity
+	if outStorageCapacity == nil {
+		t.Errorf("Expected StorageCapacity to be defaulted to: %+v, got: nil", defaultStorageCapacity)
+	} else if *outStorageCapacity != defaultStorageCapacity {
+		t.Errorf("Expected StorageCapacity to be defaulted to: %+v, got: %+v", defaultStorageCapacity, outStorageCapacity)
+	}
+}
+
+func TestSetDefaultStorageCapacityDisabled(t *testing.T) {
+	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CSIStorageCapacity, false)()
+	driver := &storagev1.CSIDriver{}
+
+	// field should not be defaulted
+	output := roundTrip(t, runtime.Object(driver)).(*storagev1.CSIDriver)
+	outStorageCapacity := output.Spec.StorageCapacity
+	if outStorageCapacity != nil {
+		t.Errorf("Expected StorageCapacity to remain nil, got: %+v", outStorageCapacity)
+	}
+}
+
 func TestSetDefaultVolumeBindingMode(t *testing.T) {
 	class := &storagev1.StorageClass{}
 
-	// When feature gate is disabled, field should not be defaulted
-	err := utilfeature.DefaultFeatureGate.Set("VolumeScheduling=false")
-	if err != nil {
-		t.Fatalf("Failed to enable feature gate for VolumeScheduling: %v", err)
-	}
-	output := roundTrip(t, runtime.Object(class)).(*storagev1.StorageClass)
-	if output.VolumeBindingMode != nil {
-		t.Errorf("Expected VolumeBindingMode to not be defaulted, got: %+v", output.VolumeBindingMode)
-	}
-
-	class = &storagev1.StorageClass{}
-
-	// When feature gate is enabled, field should be defaulted
-	err = utilfeature.DefaultFeatureGate.Set("VolumeScheduling=true")
-	if err != nil {
-		t.Fatalf("Failed to enable feature gate for VolumeScheduling: %v", err)
-	}
+	// field should be defaulted
 	defaultMode := storagev1.VolumeBindingImmediate
-	output = roundTrip(t, runtime.Object(class)).(*storagev1.StorageClass)
+	output := roundTrip(t, runtime.Object(class)).(*storagev1.StorageClass)
 	outMode := output.VolumeBindingMode
 	if outMode == nil {
 		t.Errorf("Expected VolumeBindingMode to be defaulted to: %+v, got: nil", defaultMode)
 	} else if *outMode != defaultMode {
 		t.Errorf("Expected VolumeBindingMode to be defaulted to: %+v, got: %+v", defaultMode, outMode)
-	}
-
-	err = utilfeature.DefaultFeatureGate.Set("VolumeScheduling=false")
-	if err != nil {
-		t.Fatalf("Failed to disable feature gate for VolumeScheduling: %v", err)
 	}
 }

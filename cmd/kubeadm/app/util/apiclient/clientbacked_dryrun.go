@@ -17,9 +17,13 @@ limitations under the License.
 package apiclient
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
+	"github.com/pkg/errors"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
@@ -33,7 +37,7 @@ import (
 // ClientBackedDryRunGetter implements the DryRunGetter interface for use in NewDryRunClient() and proxies all GET and LIST requests to the backing API server reachable via rest.Config
 type ClientBackedDryRunGetter struct {
 	client        clientset.Interface
-	dynamicClient dynamic.DynamicInterface
+	dynamicClient dynamic.Interface
 }
 
 // InitDryRunGetter should implement the DryRunGetter interface
@@ -60,18 +64,20 @@ func NewClientBackedDryRunGetter(config *rest.Config) (*ClientBackedDryRunGetter
 func NewClientBackedDryRunGetterFromKubeconfig(file string) (*ClientBackedDryRunGetter, error) {
 	config, err := clientcmd.LoadFromFile(file)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load kubeconfig: %v", err)
+		return nil, errors.Wrap(err, "failed to load kubeconfig")
 	}
 	clientConfig, err := clientcmd.NewDefaultClientConfig(*config, &clientcmd.ConfigOverrides{}).ClientConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create API client configuration from kubeconfig: %v", err)
+		return nil, errors.Wrap(err, "failed to create API client configuration from kubeconfig")
 	}
 	return NewClientBackedDryRunGetter(clientConfig)
 }
 
 // HandleGetAction handles GET actions to the dryrun clientset this interface supports
 func (clg *ClientBackedDryRunGetter) HandleGetAction(action core.GetAction) (bool, runtime.Object, error) {
-	unstructuredObj, err := clg.dynamicClient.Resource(action.GetResource()).Namespace(action.GetNamespace()).Get(action.GetName(), metav1.GetOptions{})
+	unstructuredObj, err := clg.dynamicClient.Resource(action.GetResource()).Namespace(action.GetNamespace()).Get(context.TODO(), action.GetName(), metav1.GetOptions{})
+	// Inform the user that the requested object wasn't found.
+	printIfNotExists(err)
 	if err != nil {
 		return true, nil, err
 	}
@@ -90,7 +96,7 @@ func (clg *ClientBackedDryRunGetter) HandleListAction(action core.ListAction) (b
 		FieldSelector: action.GetListRestrictions().Fields.String(),
 	}
 
-	unstructuredList, err := clg.dynamicClient.Resource(action.GetResource()).Namespace(action.GetNamespace()).List(listOpts)
+	unstructuredList, err := clg.dynamicClient.Resource(action.GetResource()).Namespace(action.GetNamespace()).List(context.TODO(), listOpts)
 	if err != nil {
 		return true, nil, err
 	}
@@ -108,7 +114,7 @@ func (clg *ClientBackedDryRunGetter) Client() clientset.Interface {
 }
 
 // decodeUnversionedIntoAPIObject converts the *unversioned.Unversioned object returned from the dynamic client
-// to bytes; and then decodes it back _to an external api version (k8s.io/api vs k8s.io/kubernetes/pkg/api*)_ using the normal API machinery
+// to bytes; and then decodes it back _to an external api version (k8s.io/api)_ using the normal API machinery
 func decodeUnstructuredIntoAPIObject(action core.Action, unstructuredObj runtime.Unstructured) (runtime.Object, error) {
 	objBytes, err := json.Marshal(unstructuredObj)
 	if err != nil {
@@ -119,4 +125,10 @@ func decodeUnstructuredIntoAPIObject(action core.Action, unstructuredObj runtime
 		return nil, err
 	}
 	return newObj, nil
+}
+
+func printIfNotExists(err error) {
+	if apierrors.IsNotFound(err) {
+		fmt.Println("[dryrun] The GET request didn't yield any result, the API Server returned a NotFound error.")
+	}
 }
